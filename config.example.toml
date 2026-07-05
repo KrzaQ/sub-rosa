@@ -1,0 +1,25 @@
+# sub rosa configuration — copy to ~/.config/rosa/config.toml
+
+# gpg-encrypted JSON store: {"NAME": "value", ...}
+store = "~/.secrets.json.gpg"
+
+# Key used when add/rm/edit re-encrypt the store.
+# Omit to use gpg's --default-recipient-self.
+#gpg_recipient = "you@example.com"
+
+# Unanswered approval requests are denied after this many seconds.
+request_timeout_secs = 60
+
+# Durations offered in the approval menu ("30s", "5m", "2h", "1d").
+grant_durations = ["5m", "15m", "1h"]
+
+# Warn loudly when one of these appears in the requester's process ancestry.
+flag_ancestors = ["claude", "opencode", "node", "codex"]
+
+[policy]
+# "confirm" (ask on the agent tty; the default) or "auto" (release freely
+# while the agent runs). The key "default" sets the fallback for secrets
+# not listed here.
+default = "confirm"
+#NPM_TOKEN = "auto"
+#GH_TOKEN = "auto"
