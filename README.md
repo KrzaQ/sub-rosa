@@ -83,6 +83,33 @@ Agent keys: `←/→` switch column, `↑/↓` select, `Enter` apply (`y` = allo
 once, `n`/`Esc` = deny); outside a prompt: `r` reload store, `c` clear all
 grants, `q` quit.
 
+## Wire protocol
+
+Scripts don't have to shell out to `rosa get` — the socket speaks
+newline-delimited JSON, one request per connection:
+
+```
+→ {"op":"get","name":"DB_URL"}
+← {"ok":true,"value":"postgres://…"}        # or
+← {"ok":false,"error":"denied by user"}
+```
+
+Other ops: `{"op":"ls"}` → `{"ok":true,"secrets":[{"name":…,"policy":…,
+"grant":…}]}`, `{"op":"status"}` → counts and uptime, `{"op":"reload"}`.
+
+- The socket is `$ROSA_SOCK`, defaulting to `$XDG_RUNTIME_DIR/rosa.sock`.
+- A confirm-gated `get` blocks until the human decides — up to
+  `request_timeout_secs` (+5s grace). Read without a socket timeout, or
+  with a generous one.
+- Unknown request fields are ignored, so clients may send extra context;
+  any future breaking change will introduce an explicit version field.
+- Connecting directly actually improves the approval prompt: `SO_PEERCRED`
+  then identifies your script (`python3 ./deploy.py`) as the requester
+  rather than the `rosa` client binary.
+
+Drop-in clients live in [examples/](examples/): Python, Ruby, and POSIX
+shell (socat + jq).
+
 ## Configuration
 
 See [config.example.toml](config.example.toml). Policies are per secret:
