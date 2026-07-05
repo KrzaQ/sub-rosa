@@ -8,6 +8,17 @@ use crate::config::{runtime_dir, Config};
 use crate::protocol::Request;
 use crate::store;
 
+/// `rosa init` — create an empty encrypted store so `serve` has something
+/// to load on a fresh machine.
+pub fn init(cfg: &Config) -> Result<()> {
+    let path = cfg.store_path();
+    ensure!(!path.exists(), "store already exists: {}", path.display());
+    store::save(&path, &Default::default(), cfg.gpg_recipient.as_deref())?;
+    println!("created empty store: {}", path.display());
+    println!("add secrets with `rosa add NAME` (or `rosa edit`), then run `rosa serve`");
+    Ok(())
+}
+
 /// `rosa add NAME` — value typed (hidden) on this tty, never argv or a pipe.
 pub fn add(cfg: &Config, name: &str) -> Result<()> {
     let value = rpassword::prompt_password(format!("value for {name}: "))?;

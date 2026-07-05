@@ -51,6 +51,8 @@ secret.
 ```sh
 cargo install --path .        # installs the `rosa` binary
 mkdir -p ~/.config/rosa && cp config.example.toml ~/.config/rosa/config.toml
+rosa init                     # create the empty encrypted store
+rosa add MY_TOKEN             # put something in it
 ```
 
 ## Usage

@@ -18,7 +18,11 @@ pub fn load(path: &Path) -> Result<SecretMap> {
 
 /// Decrypt to plain strings — for the management commands that re-encrypt.
 pub fn load_raw(path: &Path) -> Result<BTreeMap<String, String>> {
-    ensure!(path.exists(), "store not found: {}", path.display());
+    ensure!(
+        path.exists(),
+        "store not found: {} — create it with `rosa init` or `rosa add NAME`",
+        path.display()
+    );
     let out = Command::new("gpg")
         .args(["--quiet", "--decrypt"])
         .arg(path)

@@ -16,6 +16,8 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "rosa", version)]
 enum Cmd {
+    /// Create an empty encrypted store
+    Init,
     /// Run the agent with its approval TUI (in a dedicated tmux/screen window)
     Serve,
     /// Print a secret's value to stdout (no trailing newline); prefer `exec`
@@ -45,6 +47,7 @@ enum Cmd {
 fn main() -> Result<()> {
     let cfg = config::Config::load()?;
     match Cmd::parse() {
+        Cmd::Init => mgmt::init(&cfg),
         Cmd::Serve => server::serve(cfg),
         Cmd::Get { name } => client::get(&name),
         Cmd::Exec { names, cmd } => client::exec(&names, &cmd),
