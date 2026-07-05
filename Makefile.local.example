@@ -1,0 +1,8 @@
+# Copy to Makefile.local and fill in your machine-specific values.
+# Makefile.local is gitignored; this .example documents the expected targets.
+
+.PHONY: push
+
+push:            ## push master to your configured remotes
+	git push gh master
+	git push kq master
