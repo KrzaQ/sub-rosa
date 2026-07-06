@@ -63,7 +63,14 @@ pub fn ls(cfg: &Config) -> Result<()> {
         Ok(v) => {
             for s in v["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
                 let name = s["name"].as_str().unwrap_or("?");
-                let policy = s["policy"].as_str().unwrap_or("?");
+                let mut policy = s["policy"].as_str().unwrap_or("?").to_string();
+                // TUI-set runtime override; absent field means config.
+                if s["source"].as_str() == Some("override") {
+                    policy.push('*');
+                    if let Some(exp) = s["expires"].as_str() {
+                        policy.push_str(&format!(" until:{exp}"));
+                    }
+                }
                 match s["grant"].as_str() {
                     Some(g) => println!("{name}\t{policy}\tgranted:{g}"),
                     None => println!("{name}\t{policy}"),

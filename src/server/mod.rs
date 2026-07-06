@@ -1,6 +1,7 @@
 pub mod peer;
 pub mod tui;
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
@@ -61,10 +62,26 @@ pub struct Grant {
     pub until: GrantUntil,
 }
 
+/// Where an effective policy came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicySource {
+    Config,
+    Override,
+}
+
+/// Runtime policy override. TUI-only and ephemeral: never persisted, and
+/// deliberately not settable over the socket — anything on the socket is
+/// reachable by the processes rosa is guarding.
+pub struct PolicyOverride {
+    pub policy: Policy,
+    pub until: GrantUntil,
+}
+
 /// State shared between connection-handler threads and the TUI thread.
 pub struct Shared {
     pub store: SecretMap,
     pub grants: Vec<Grant>,
+    pub overrides: HashMap<String, PolicyOverride>,
     pub cfg: Config,
     pub started: Instant,
 }
@@ -87,6 +104,42 @@ impl Shared {
         let now = Instant::now();
         self.grants
             .retain(|g| !matches!(g.until, GrantUntil::At(t) if t <= now));
+        self.overrides
+            .retain(|_, o| !matches!(o.until, GrantUntil::At(t) if t <= now));
+    }
+
+    /// Live override else config. Non-mutating — an expired-but-unpruned
+    /// override counts as absent, so this is safe to call while iterating
+    /// `store` under the same borrow; removal happens in prune_grants().
+    pub fn effective_policy(&self, name: &str) -> (Policy, PolicySource) {
+        let now = Instant::now();
+        match self.overrides.get(name) {
+            Some(o) if !matches!(o.until, GrantUntil::At(t) if t <= now) => {
+                (o.policy, PolicySource::Override)
+            }
+            _ => (self.cfg.policy_for(name), PolicySource::Config),
+        }
+    }
+
+    /// Returns the number of grants revoked (a confirm lock revokes the
+    /// secret's grants — a lock that left live grants active would lie).
+    pub fn set_override(&mut self, name: &str, ov: PolicyOverride) -> usize {
+        let mut revoked = 0;
+        if ov.policy == Policy::Confirm {
+            let before = self.grants.len();
+            self.grants.retain(|g| g.name != name);
+            revoked = before - self.grants.len();
+        }
+        self.overrides.insert(name.to_string(), ov);
+        revoked
+    }
+
+    /// Remaining lifetime of a live override, human-formatted.
+    pub fn override_expiry(&self, name: &str) -> Option<String> {
+        self.overrides.get(name).map(|o| match o.until {
+            GrantUntil::Session => "session".to_string(),
+            GrantUntil::At(t) => format_remaining(t.saturating_duration_since(Instant::now())),
+        })
     }
 }
 
@@ -129,6 +182,7 @@ pub fn serve(cfg: Config) -> Result<()> {
     let shared = Arc::new(Mutex::new(Shared {
         store: secrets,
         grants: Vec::new(),
+        overrides: HashMap::new(),
         cfg,
         started: Instant::now(),
     }));
@@ -189,12 +243,20 @@ fn handle(conn: &UnixStream, shared: &Mutex<Shared>, tx: &Sender<ServerMsg>) -> 
                 .store
                 .keys()
                 .map(|name| {
-                    let policy = match sh.cfg.policy_for(name) {
+                    let (policy, source) = sh.effective_policy(name);
+                    let policy = match policy {
                         Policy::Auto => "auto",
                         Policy::Confirm => "confirm",
                     };
+                    let (source, expires) = match source {
+                        PolicySource::Config => ("config", None),
+                        PolicySource::Override => ("override", sh.override_expiry(name)),
+                    };
                     let grant = best_grant(&sh, name);
-                    json!({"name": name, "policy": policy, "grant": grant})
+                    json!({
+                        "name": name, "policy": policy, "source": source,
+                        "expires": expires, "grant": grant,
+                    })
                 })
                 .collect();
             reply(conn, json!({"ok": true, "secrets": secrets}))
@@ -272,10 +334,11 @@ fn handle_get(
             .ok();
             return reply(conn, json!({"ok": false, "error": format!("unknown secret: {name}")}));
         }
-        let released = match sh.cfg.policy_for(name) {
-            Policy::Auto => Some("auto"),
-            Policy::Confirm if sh.grant_active(name, &who) => Some("grant"),
-            Policy::Confirm => None,
+        let released = match sh.effective_policy(name) {
+            (Policy::Auto, PolicySource::Override) => Some("auto*"),
+            (Policy::Auto, PolicySource::Config) => Some("auto"),
+            (Policy::Confirm, _) if sh.grant_active(name, &who) => Some("grant"),
+            (Policy::Confirm, _) => None,
         };
         if let Some(why) = released {
             let value = sh.store.get(name).unwrap().to_string();

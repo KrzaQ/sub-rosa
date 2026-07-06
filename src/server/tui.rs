@@ -15,10 +15,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::config::{parse_duration, Policy};
+use crate::config::{parse_duration, Config, Policy};
 use crate::server::peer::comm_matches;
 use crate::server::{
-    format_remaining, Decision, Grant, GrantScope, GrantUntil, PendingReq, ServerMsg, Shared,
+    format_remaining, Decision, Grant, GrantScope, GrantUntil, PendingReq, PolicyOverride,
+    PolicySource, ServerMsg, Shared,
 };
 use crate::store;
 
@@ -45,6 +46,43 @@ enum Col {
     Actions,
 }
 
+/// Idle, or inside the user-opened per-secret menu. While the menu is open
+/// the request modal stays hidden and incoming requests queue (their
+/// auto-deny clock keeps ticking) — a user-opened modal is never interrupted.
+enum UiMode {
+    Idle,
+    SecretMenu(SecretMenu),
+}
+
+struct SecretMenu {
+    /// Secret name captured at open; re-validated against the store at
+    /// every commit, since a reload can remove it while the menu is up.
+    name: String,
+    view: MenuView,
+    state: ListState,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MenuView {
+    Root,
+    Durations,
+}
+
+#[derive(Clone, Copy)]
+enum MenuItem {
+    MakeAuto,
+    ForceConfirm,
+    RevertToConfig,
+    Cancel,
+}
+
+#[derive(Clone)]
+enum DurationItem {
+    For(Duration, String),
+    Session,
+    Back,
+}
+
 struct App {
     shared: Arc<Mutex<Shared>>,
     rx: Receiver<ServerMsg>,
@@ -53,6 +91,11 @@ struct App {
     action_state: ListState,
     proc_state: ListState,
     focus: Col,
+    mode: UiMode,
+    /// Secrets-pane cursor, by name: the store is a sorted BTreeMap, so a
+    /// name survives reloads and resolves to a stable position.
+    cursor: Option<String>,
+    secret_state: ListState,
     sock: String,
     timeout: Duration,
     quit: bool,
@@ -71,10 +114,13 @@ impl App {
         }
     }
 
-    /// Reset modal selection for a new front request: action = allow once,
-    /// process = the requester (last tree row), focus on the action column.
+    /// Reset modal selection for a new front request: action = deny (always
+    /// last), so a stray buffered Enter fails safe — see the KEYBINDING
+    /// INVARIANT on handle_key. Process = the requester (last tree row),
+    /// focus on the action column.
     fn reset_modal(&mut self) {
-        self.action_state.select(Some(0));
+        let n_actions = action_items(self).len();
+        self.action_state.select(Some(n_actions.saturating_sub(1)));
         let rows = self.proc_rows();
         self.proc_state.select(Some(rows.saturating_sub(1)));
         self.focus = Col::Actions;
@@ -86,6 +132,49 @@ impl App {
             .front()
             .map(|p| p.peer.ancestry.len().max(1))
             .unwrap_or(1)
+    }
+
+    /// Index of the cursor in the sorted `names`; a vanished secret slides
+    /// to its lexicographic successor. Rewrites the cursor to the resolved
+    /// name. `names` must be non-empty.
+    fn resolve_cursor(&mut self, names: &[String]) -> usize {
+        let idx = match &self.cursor {
+            Some(name) => match names.binary_search(name) {
+                Ok(i) => i,
+                Err(i) => i.min(names.len() - 1),
+            },
+            None => 0,
+        };
+        self.cursor = Some(names[idx].clone());
+        idx
+    }
+
+    fn secret_names(&self) -> Vec<String> {
+        self.shared.lock().unwrap().store.keys().cloned().collect()
+    }
+
+    fn move_cursor(&mut self, delta: i64) {
+        let names = self.secret_names();
+        if names.is_empty() {
+            self.cursor = None;
+            return;
+        }
+        let cur = self.resolve_cursor(&names) as i64;
+        let next = (cur + delta).clamp(0, names.len() as i64 - 1) as usize;
+        self.cursor = Some(names[next].clone());
+    }
+
+    fn open_menu(&mut self) {
+        let names = self.secret_names();
+        if names.is_empty() {
+            return;
+        }
+        let idx = self.resolve_cursor(&names);
+        self.mode = UiMode::SecretMenu(SecretMenu {
+            name: names[idx].clone(),
+            view: MenuView::Root,
+            state: ListState::default().with_selected(Some(0)),
+        });
     }
 
     /// Grant scope for the currently selected process-tree row.
@@ -113,6 +202,9 @@ pub fn run(shared: Arc<Mutex<Shared>>, rx: Receiver<ServerMsg>, sock: &Path) -> 
         action_state: ListState::default().with_selected(Some(0)),
         proc_state: ListState::default(),
         focus: Col::Actions,
+        mode: UiMode::Idle,
+        cursor: None,
+        secret_state: ListState::default(),
         sock: sock.display().to_string(),
         timeout,
         quit: false,
@@ -181,30 +273,55 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     Ok(())
 }
 
+/// KEYBINDING INVARIANT — the request-approval modal is the only UI surface
+/// that appears WITHOUT user action, so it must be robust against keystrokes
+/// buffered before it appeared (slow SSH, typed against a stale screen):
+///   (a) no key bound in the idle view may act as a commit key in the
+///       request modal (idle keys q r c ↑ ↓ j k space either move a
+///       selection there or do nothing);
+///   (b) no commit key of the request modal may be bound in the idle view
+///       (Enter commits only inside modals and is a no-op in idle; there is
+///       deliberately no single-key "allow" shortcut).
+/// n/d/Esc deny in the request modal — an accidental deny is safe, an
+/// accidental allow is not. reset_modal() pre-selects Deny so even a stray
+/// Enter fails safe. User-opened modals (the secret menu) can't be raced:
+/// requests queue behind them instead of stealing focus.
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
         app.quit = true;
         return;
     }
-    if app.pending.is_empty() {
-        match code {
-            KeyCode::Char('q') => app.quit = true,
-            KeyCode::Char('r') => app.want_reload = true,
-            KeyCode::Char('c') => {
-                let n = {
-                    let mut sh = app.shared.lock().unwrap();
-                    let n = sh.grants.len();
-                    sh.grants.clear();
-                    n
-                };
-                app.log(format!("cleared {n} grant(s)"), false);
-            }
-            _ => {}
-        }
-        return;
+    if matches!(app.mode, UiMode::SecretMenu(_)) {
+        handle_menu_key(app, code);
+    } else if !app.pending.is_empty() {
+        handle_request_key(app, code);
+    } else {
+        handle_idle_key(app, code);
     }
+}
 
-    // Modal keys.
+fn handle_idle_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('r') => app.want_reload = true,
+        KeyCode::Char('c') => {
+            let n = {
+                let mut sh = app.shared.lock().unwrap();
+                let n = sh.grants.len();
+                sh.grants.clear();
+                n
+            };
+            app.log(format!("cleared {n} grant(s)"), false);
+        }
+        KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.move_cursor(1),
+        KeyCode::Char(' ') => app.open_menu(),
+        // Enter is deliberately unbound here — see the KEYBINDING INVARIANT.
+        _ => {}
+    }
+}
+
+fn handle_request_key(app: &mut App, code: KeyCode) {
     let actions = action_items(app);
     match code {
         KeyCode::Left | KeyCode::Char('h') => app.focus = Col::Procs,
@@ -232,9 +349,22 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             let sel = app.action_state.selected().unwrap_or(0).min(actions.len() - 1);
             decide(app, actions[sel].clone());
         }
-        KeyCode::Char('y') => decide(app, Action::AllowOnce),
         KeyCode::Char('n') | KeyCode::Char('d') | KeyCode::Esc => decide(app, Action::Deny),
+        // Space is bound in the idle view; it must stay a no-op here — see
+        // the KEYBINDING INVARIANT.
+        KeyCode::Char(' ') => {}
         _ => {}
+    }
+}
+
+fn handle_menu_key(app: &mut App, code: KeyCode) {
+    let (name, view) = match &app.mode {
+        UiMode::SecretMenu(m) => (m.name.clone(), m.view),
+        _ => return,
+    };
+    match view {
+        MenuView::Root => menu_root_key(app, &name, code),
+        MenuView::Durations => menu_durations_key(app, &name, code),
     }
 }
 
@@ -249,6 +379,157 @@ fn action_items(app: &App) -> Vec<Action> {
     items.push(Action::AllowSession);
     items.push(Action::Deny);
     items
+}
+
+// ------------------------------------------------------- secret menu ----
+
+/// Recomputed from live state on every keypress and frame, so an override
+/// expiring mid-menu just flips the items instead of going stale.
+fn menu_root_items(sh: &Shared, name: &str) -> Vec<MenuItem> {
+    match sh.effective_policy(name) {
+        (_, PolicySource::Override) => vec![MenuItem::RevertToConfig, MenuItem::Cancel],
+        (Policy::Confirm, _) => vec![MenuItem::MakeAuto, MenuItem::Cancel],
+        (Policy::Auto, _) => vec![MenuItem::ForceConfirm, MenuItem::Cancel],
+    }
+}
+
+fn menu_item_label(item: MenuItem) -> &'static str {
+    match item {
+        MenuItem::MakeAuto => "make auto…",
+        MenuItem::ForceConfirm => "force confirm (revokes grants)",
+        MenuItem::RevertToConfig => "revert to config",
+        MenuItem::Cancel => "cancel",
+    }
+}
+
+/// Empty/unparseable grant_durations degrade to just session + back.
+fn duration_items(cfg: &Config) -> Vec<DurationItem> {
+    let mut items: Vec<DurationItem> = cfg
+        .grant_durations
+        .iter()
+        .filter_map(|d| parse_duration(d).map(|dur| DurationItem::For(dur, d.clone())))
+        .collect();
+    items.push(DurationItem::Session);
+    items.push(DurationItem::Back);
+    items
+}
+
+fn duration_item_label(item: &DurationItem) -> String {
+    match item {
+        DurationItem::For(_, d) => format!("auto for {d}"),
+        DurationItem::Session => "auto until agent exits".to_string(),
+        DurationItem::Back => "back".to_string(),
+    }
+}
+
+/// Selected menu index, clamped to `len` (the item list can shrink under
+/// the cursor when an override expires mid-menu).
+fn menu_selected(app: &App, len: usize) -> usize {
+    match &app.mode {
+        UiMode::SecretMenu(m) => m.state.selected().unwrap_or(0).min(len.saturating_sub(1)),
+        _ => 0,
+    }
+}
+
+fn menu_move(app: &mut App, delta: i64, len: usize) {
+    if let UiMode::SecretMenu(m) = &mut app.mode {
+        let cur = m.state.selected().unwrap_or(0) as i64;
+        let max = len.saturating_sub(1) as i64;
+        m.state.select(Some((cur + delta).clamp(0, max) as usize));
+    }
+}
+
+fn menu_set_view(app: &mut App, view: MenuView) {
+    if let UiMode::SecretMenu(m) = &mut app.mode {
+        m.view = view;
+        m.state.select(Some(0));
+    }
+}
+
+fn close_menu(app: &mut App) {
+    app.mode = UiMode::Idle;
+    // A queued request's modal is revealed now; make sure it sits on Deny.
+    if !app.pending.is_empty() {
+        app.reset_modal();
+    }
+}
+
+fn menu_root_key(app: &mut App, name: &str, code: KeyCode) {
+    let items = {
+        let sh = app.shared.lock().unwrap();
+        menu_root_items(&sh, name)
+    };
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => menu_move(app, -1, items.len()),
+        KeyCode::Down | KeyCode::Char('j') => menu_move(app, 1, items.len()),
+        KeyCode::Esc => close_menu(app),
+        KeyCode::Enter => match items[menu_selected(app, items.len())] {
+            MenuItem::MakeAuto => menu_set_view(app, MenuView::Durations),
+            MenuItem::ForceConfirm => apply_override(
+                app,
+                name,
+                PolicyOverride { policy: Policy::Confirm, until: GrantUntil::Session },
+                "session",
+            ),
+            MenuItem::RevertToConfig => {
+                let msg = {
+                    let mut sh = app.shared.lock().unwrap();
+                    sh.overrides.remove(name);
+                    format!("override {name} reverted to config")
+                };
+                app.log(msg, false);
+                close_menu(app);
+            }
+            MenuItem::Cancel => close_menu(app),
+        },
+        _ => {}
+    }
+}
+
+fn menu_durations_key(app: &mut App, name: &str, code: KeyCode) {
+    let items = duration_items(&app.shared.lock().unwrap().cfg);
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => menu_move(app, -1, items.len()),
+        KeyCode::Down | KeyCode::Char('j') => menu_move(app, 1, items.len()),
+        KeyCode::Esc => menu_set_view(app, MenuView::Root),
+        KeyCode::Enter => match &items[menu_selected(app, items.len())] {
+            DurationItem::For(dur, label) => {
+                let until = GrantUntil::At(Instant::now() + *dur);
+                let label = label.clone();
+                apply_override(
+                    app,
+                    name,
+                    PolicyOverride { policy: Policy::Auto, until },
+                    &label,
+                );
+            }
+            DurationItem::Session => apply_override(
+                app,
+                name,
+                PolicyOverride { policy: Policy::Auto, until: GrantUntil::Session },
+                "session",
+            ),
+            DurationItem::Back => menu_set_view(app, MenuView::Root),
+        },
+        _ => {}
+    }
+}
+
+fn apply_override(app: &mut App, name: &str, ov: PolicyOverride, label: &str) {
+    let msg = {
+        let mut sh = app.shared.lock().unwrap();
+        if !sh.store.contains_key(name) {
+            format!("{name} vanished; no change")
+        } else if ov.policy == Policy::Confirm {
+            let revoked = sh.set_override(name, ov);
+            format!("override {name} confirm (lock) — revoked {revoked} grant(s)")
+        } else {
+            sh.set_override(name, ov);
+            format!("override {name} auto [{label}]")
+        }
+    };
+    app.log(msg, false);
+    close_menu(app);
 }
 
 fn decide(app: &mut App, action: Action) {
@@ -310,8 +591,27 @@ fn reload(terminal: &mut DefaultTerminal, app: &mut App) {
     match loaded {
         Ok(map) => {
             let n = map.len();
-            app.shared.lock().unwrap().store = map;
+            {
+                let mut guard = app.shared.lock().unwrap();
+                let sh = &mut *guard;
+                sh.store = map;
+                // A deleted-then-readded secret must not resurrect an auto
+                // override; confirm locks are kept (fail-safe either way).
+                let store = &sh.store;
+                sh.overrides
+                    .retain(|name, o| o.policy == Policy::Confirm || store.contains_key(name));
+            }
             app.log(format!("store reloaded ({n} secrets)"), false);
+            let menu_name = match &app.mode {
+                UiMode::SecretMenu(m) => Some(m.name.clone()),
+                _ => None,
+            };
+            if let Some(name) = menu_name {
+                if !app.shared.lock().unwrap().store.contains_key(&name) {
+                    app.log(format!("{name} removed; closing menu"), false);
+                    close_menu(app);
+                }
+            }
         }
         Err(e) => app.log(format!("reload failed: {e:#}"), true),
     }
@@ -327,11 +627,24 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let (n_secrets, n_grants, secret_lines) = secrets_snapshot(app);
 
+    // Front-request countdown stays visible even while an open menu hides
+    // the request modal, so a queued request can't silently run out.
+    let deny_in = app
+        .pending
+        .front()
+        .map(|p| {
+            format!(
+                " · deny in {}",
+                format_remaining(app.timeout.saturating_sub(p.received.elapsed()))
+            )
+        })
+        .unwrap_or_default();
     let header = format!(
-        " sub rosa · {} secrets · {} grants · {} pending · {}",
+        " sub rosa · {} secrets · {} grants · {} pending{} · {}",
         n_secrets,
         n_grants,
         app.pending.len(),
+        deny_in,
         app.sock,
     );
     f.render_widget(
@@ -344,9 +657,12 @@ fn draw(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
         .split(rows[1]);
 
-    f.render_widget(
-        List::new(secret_lines).block(Block::default().borders(Borders::ALL).title(" secrets ")),
+    f.render_stateful_widget(
+        List::new(secret_lines)
+            .block(Block::default().borders(Borders::ALL).title(" secrets "))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
         cols[0],
+        &mut app.secret_state,
     );
 
     let log_height = cols[1].height.saturating_sub(2) as usize;
@@ -373,54 +689,134 @@ fn draw(f: &mut Frame, app: &mut App) {
         cols[1],
     );
 
-    let help = if app.pending.is_empty() {
-        " q quit · r reload store · c clear grants"
+    let help = if matches!(app.mode, UiMode::SecretMenu(_)) {
+        " ↑/↓ select · enter apply · esc back"
+    } else if !app.pending.is_empty() {
+        " ←/→ column · ↑/↓ select · enter apply · n deny"
     } else {
-        " ←/→ column · ↑/↓ select · enter apply · y allow once · n deny"
+        " ↑/↓ select · space menu · q quit · r reload store · c clear grants"
     };
     f.render_widget(
         Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
         rows[2],
     );
 
-    if !app.pending.is_empty() {
+    // The request modal is drawn (and keyed) only when no user-opened modal
+    // is active; requests queue behind the secret menu.
+    if !app.pending.is_empty() && matches!(app.mode, UiMode::Idle) {
         draw_modal(f, app);
+    }
+    if matches!(app.mode, UiMode::SecretMenu(_)) {
+        draw_secret_menu(f, app);
     }
 }
 
-fn secrets_snapshot(app: &App) -> (usize, usize, Vec<ListItem<'static>>) {
-    let mut sh = app.shared.lock().unwrap();
-    sh.prune_grants();
-    let n_secrets = sh.store.len();
-    let n_grants = sh.grants.len();
-    let now = Instant::now();
-    let lines = sh
-        .store
-        .keys()
-        .map(|name| {
-            let mut spans = vec![Span::raw(format!("{name} "))];
-            match sh.cfg.policy_for(name) {
-                Policy::Auto => {
-                    spans.push(Span::styled("auto", Style::default().fg(Color::Yellow)))
+fn secrets_snapshot(app: &mut App) -> (usize, usize, Vec<ListItem<'static>>) {
+    let (names, n_grants, lines) = {
+        let mut sh = app.shared.lock().unwrap();
+        sh.prune_grants();
+        let n_grants = sh.grants.len();
+        let now = Instant::now();
+        let names: Vec<String> = sh.store.keys().cloned().collect();
+        let lines = names
+            .iter()
+            .map(|name| {
+                let mut spans = vec![Span::raw(format!("{name} "))];
+                match sh.effective_policy(name) {
+                    (Policy::Auto, PolicySource::Config) => {
+                        spans.push(Span::styled("auto", Style::default().fg(Color::Yellow)))
+                    }
+                    (Policy::Confirm, PolicySource::Config) => {
+                        spans.push(Span::styled("confirm", Style::default().fg(Color::DarkGray)))
+                    }
+                    (policy, PolicySource::Override) => {
+                        let label = match policy {
+                            Policy::Auto => "auto*",
+                            Policy::Confirm => "confirm*",
+                        };
+                        spans.push(Span::styled(
+                            label,
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        ));
+                        if let Some(exp) = sh.override_expiry(name) {
+                            spans.push(Span::styled(
+                                format!(" ({exp})"),
+                                Style::default().fg(Color::Magenta),
+                            ));
+                        }
+                    }
                 }
-                Policy::Confirm => {
-                    spans.push(Span::styled("confirm", Style::default().fg(Color::DarkGray)))
+                for g in sh.grants.iter().filter(|g| g.name == *name) {
+                    let until = match g.until {
+                        GrantUntil::Session => "session".to_string(),
+                        GrantUntil::At(t) => format_remaining(t.saturating_duration_since(now)),
+                    };
+                    spans.push(Span::styled(
+                        format!(" ●{}:{}", g.scope.label(), until),
+                        Style::default().fg(Color::Green),
+                    ));
                 }
-            }
-            for g in sh.grants.iter().filter(|g| g.name == *name) {
-                let until = match g.until {
-                    GrantUntil::Session => "session".to_string(),
-                    GrantUntil::At(t) => format_remaining(t.saturating_duration_since(now)),
-                };
-                spans.push(Span::styled(
-                    format!(" ●{}:{}", g.scope.label(), until),
-                    Style::default().fg(Color::Green),
-                ));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
-    (n_secrets, n_grants, lines)
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        (names, n_grants, lines)
+    };
+    if names.is_empty() {
+        app.cursor = None;
+        app.secret_state.select(None);
+    } else {
+        let idx = app.resolve_cursor(&names);
+        app.secret_state.select(Some(idx));
+    }
+    (names.len(), n_grants, lines)
+}
+
+fn draw_secret_menu(f: &mut Frame, app: &mut App) {
+    let (name, view) = match &app.mode {
+        UiMode::SecretMenu(m) => (m.name.clone(), m.view),
+        _ => return,
+    };
+    let (labels, title) = match view {
+        MenuView::Root => {
+            let sh = app.shared.lock().unwrap();
+            let labels: Vec<String> = menu_root_items(&sh, &name)
+                .iter()
+                .map(|i| menu_item_label(*i).to_string())
+                .collect();
+            (labels, format!(" {name} "))
+        }
+        MenuView::Durations => {
+            let cfg_items = duration_items(&app.shared.lock().unwrap().cfg);
+            let labels: Vec<String> = cfg_items.iter().map(duration_item_label).collect();
+            (labels, format!(" {name} · make auto "))
+        }
+    };
+
+    let width = labels
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count())
+        .max(24) as u16
+        + 4;
+    let area = centered(f.area(), width, labels.len() as u16 + 2);
+    f.render_widget(Clear, area);
+
+    let items: Vec<ListItem> = labels.iter().map(|l| ListItem::new(format!(" {l}"))).collect();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta))
+                .title(title),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED).add_modifier(Modifier::BOLD));
+    if let UiMode::SecretMenu(m) = &mut app.mode {
+        let sel = m.state.selected().unwrap_or(0).min(labels.len().saturating_sub(1));
+        m.state.select(Some(sel));
+        f.render_stateful_widget(list, area, &mut m.state);
+    }
 }
 
 fn draw_modal(f: &mut Frame, app: &mut App) {
