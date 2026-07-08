@@ -3,12 +3,14 @@ pub mod tui;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use nix::poll::{PollFd, PollFlags, PollTimeout};
 use serde_json::{json, Value};
 
 use crate::config::{Config, Policy};
@@ -60,6 +62,37 @@ pub struct Grant {
     pub name: String,
     pub scope: GrantScope,
     pub until: GrantUntil,
+    /// A pidfd for a `Pid`-scoped grant's ancestor, so `prune_grants` can drop
+    /// the grant the moment the process exits (race-free vs. PID reuse). `None`
+    /// for `Exe` grants and when `pidfd_open` is unavailable (old kernel) — such
+    /// grants fall back to the lazy comm-recheck in `GrantScope::matches`.
+    pub watch: Option<OwnedFd>,
+}
+
+/// Open a pidfd watching a `Pid`-scoped grant's ancestor process. Returns `None`
+/// for `Exe` scopes and if the syscall fails (e.g. pre-5.3 kernel, or the process
+/// already exited between selection and here).
+pub fn pidfd_for(scope: &GrantScope) -> Option<OwnedFd> {
+    let GrantScope::Pid { pid, .. } = scope else {
+        return None;
+    };
+    // SAFETY: pidfd_open has no side effects on our address space; on success it
+    // returns a fresh owned fd, which we immediately wrap in OwnedFd. (libc 0.2
+    // has no wrapper fn, so go through the raw syscall.)
+    let fd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, *pid, 0) };
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+/// Whether the process behind a pidfd has exited: a pidfd becomes readable
+/// (`POLLIN`) exactly when its process dies. Non-blocking (zero timeout).
+fn pidfd_dead(fd: &OwnedFd) -> bool {
+    let mut fds = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+    match nix::poll::poll(&mut fds, PollTimeout::ZERO) {
+        Ok(n) if n > 0 => fds[0]
+            .revents()
+            .is_some_and(|r| r.intersects(PollFlags::POLLIN | PollFlags::POLLHUP)),
+        _ => false,
+    }
 }
 
 /// Where an effective policy came from.
@@ -102,8 +135,11 @@ impl Shared {
 
     pub fn prune_grants(&mut self) {
         let now = Instant::now();
-        self.grants
-            .retain(|g| !matches!(g.until, GrantUntil::At(t) if t <= now));
+        self.grants.retain(|g| {
+            let expired = matches!(g.until, GrantUntil::At(t) if t <= now);
+            let dead = g.watch.as_ref().is_some_and(pidfd_dead);
+            !expired && !dead
+        });
         self.overrides
             .retain(|_, o| !matches!(o.until, GrantUntil::At(t) if t <= now));
     }
@@ -372,5 +408,72 @@ fn handle_get(
         }
         Ok(Decision::Deny) => reply(conn, json!({"ok": false, "error": "denied by user"})),
         Err(_) => reply(conn, json!({"ok": false, "error": "request timed out unanswered"})),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    // A pidfd for a live process must not read as dead; once the process exits
+    // it must. This is the liveness signal `prune_grants` relies on to reap
+    // pid-scoped grants the moment their process is gone.
+    #[test]
+    fn pidfd_tracks_process_exit() {
+        let mut child = Command::new("sleep").arg("100").spawn().expect("spawn sleep");
+        let scope = GrantScope::Pid {
+            pid: child.id() as i32,
+            comm: "sleep".to_string(),
+        };
+        let fd = pidfd_for(&scope).expect("pidfd_open on a live child");
+        assert!(!pidfd_dead(&fd), "live process must not read as dead");
+
+        child.kill().expect("kill child");
+        child.wait().expect("reap child");
+        assert!(pidfd_dead(&fd), "exited process must read as dead");
+    }
+
+    // Exe-scoped grants have no process to watch.
+    #[test]
+    fn exe_scope_has_no_pidfd() {
+        assert!(pidfd_for(&GrantScope::Exe("/bin/true".into())).is_none());
+    }
+
+    // The integration point: a pid-scoped grant whose process has exited is
+    // dropped by prune_grants, while an unrelated exe-scoped grant survives.
+    #[test]
+    fn prune_drops_grant_when_process_dies() {
+        let mut child = Command::new("sleep").arg("100").spawn().expect("spawn sleep");
+        let pid = child.id() as i32;
+        let mut sh = Shared {
+            store: SecretMap::new(),
+            grants: vec![
+                Grant {
+                    name: "db".into(),
+                    scope: GrantScope::Pid { pid, comm: "sleep".into() },
+                    until: GrantUntil::Session,
+                    watch: pidfd_for(&GrantScope::Pid { pid, comm: "sleep".into() }),
+                },
+                Grant {
+                    name: "api".into(),
+                    scope: GrantScope::Exe("/bin/true".into()),
+                    until: GrantUntil::Session,
+                    watch: None,
+                },
+            ],
+            overrides: HashMap::new(),
+            cfg: Config::default(),
+            started: Instant::now(),
+        };
+
+        sh.prune_grants();
+        assert_eq!(sh.grants.len(), 2, "both grants live while the process runs");
+
+        child.kill().expect("kill child");
+        child.wait().expect("reap child");
+        sh.prune_grants();
+        assert_eq!(sh.grants.len(), 1, "the pid grant is pruned once its process dies");
+        assert_eq!(sh.grants[0].name, "api", "the exe grant survives");
     }
 }

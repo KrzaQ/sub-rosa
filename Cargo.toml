@@ -14,7 +14,7 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
-nix = { version = "0.29", features = ["socket"] }
+nix = { version = "0.29", features = ["socket", "poll"] }
 ratatui = "0.29"
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }

@@ -18,8 +18,8 @@ use ratatui::{DefaultTerminal, Frame};
 use crate::config::{parse_duration, Config, Policy};
 use crate::server::peer::comm_matches;
 use crate::server::{
-    format_remaining, Decision, Grant, GrantScope, GrantUntil, PendingReq, PolicyOverride,
-    PolicySource, ServerMsg, Shared,
+    format_remaining, pidfd_for, Decision, Grant, GrantScope, GrantUntil, PendingReq,
+    PolicyOverride, PolicySource, ServerMsg, Shared,
 };
 use crate::store;
 
@@ -542,20 +542,24 @@ fn decide(app: &mut App, action: Action) {
         Action::AllowFor(dur, label) => {
             let scope = app.selected_scope(&p);
             let note = format!("grant {} {}", scope.label(), label);
+            let watch = pidfd_for(&scope);
             app.shared.lock().unwrap().add_grant(Grant {
                 name: p.name.clone(),
                 scope,
                 until: GrantUntil::At(Instant::now() + dur),
+                watch,
             });
             (Decision::Allow, Some(note))
         }
         Action::AllowSession => {
             let scope = app.selected_scope(&p);
             let note = format!("grant {} session", scope.label());
+            let watch = pidfd_for(&scope);
             app.shared.lock().unwrap().add_grant(Grant {
                 name: p.name.clone(),
                 scope,
                 until: GrantUntil::Session,
+                watch,
             });
             (Decision::Allow, Some(note))
         }
