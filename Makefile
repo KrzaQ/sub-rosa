@@ -5,8 +5,9 @@
 .PHONY: build test fmt lint install clean help
 
 help:            ## list available targets
-	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+		| sort | awk 'BEGIN{FS=":.*?## ";w=12}{k[NR]=$$1;v[NR]=$$2;if(length($$1)>w)w=length($$1)} \
+			END{for(i=1;i<=NR;i++)printf "  \033[36m%-*s\033[0m %s\n", w, k[i], v[i]}'
 
 build:           ## release build (target/release/rosa)
 	cargo build --release
