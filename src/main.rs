@@ -5,8 +5,10 @@ mod protocol;
 mod server;
 mod store;
 
+use std::path::PathBuf;
+
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// sub rosa — a secret-brokering agent with a human approval gate on its own tty.
 ///
@@ -15,6 +17,16 @@ use clap::Parser;
 /// requesting process (human or AI agent) cannot reach.
 #[derive(Parser)]
 #[command(name = "rosa", version)]
+struct Cli {
+    /// Path to the gpg-encrypted store, overriding the config's `store` and the default
+    /// (~/.config/rosa/secrets.json.gpg). Accepted before or after the subcommand.
+    #[arg(long, global = true, value_name = "PATH")]
+    store: Option<PathBuf>,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Create an empty encrypted store
     Init,
@@ -45,8 +57,12 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    let cfg = config::Config::load()?;
-    match Cmd::parse() {
+    let cli = Cli::parse();
+    let mut cfg = config::Config::load()?;
+    if let Some(store) = cli.store {
+        cfg.set_store(store);
+    }
+    match cli.cmd {
         Cmd::Init => mgmt::init(&cfg),
         Cmd::Serve => server::serve(cfg),
         Cmd::Get { name } => client::get(&name),

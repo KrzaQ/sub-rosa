@@ -27,8 +27,9 @@ secret.
 └────────────────────────────────┘        └────────────────────────────────┘
 ```
 
-- Secrets live **gpg-encrypted at rest** (`~/.secrets.json.gpg`, a JSON
-  object of `NAME: value`). They are decrypted once, into the agent's
+- Secrets live **gpg-encrypted at rest** (`~/.config/rosa/secrets.json.gpg`
+  by default — set `store` in the config or pass `--store` to override — a
+  JSON object of `NAME: value`). They are decrypted once, into the agent's
   memory, when `rosa serve` starts.
 - Values only leave the agent over a `0600` unix socket in
   `$XDG_RUNTIME_DIR`.

@@ -1,7 +1,8 @@
 # sub rosa configuration — copy to ~/.config/rosa/config.toml
 
-# gpg-encrypted JSON store: {"NAME": "value", ...}
-store = "~/.secrets.json.gpg"
+# gpg-encrypted JSON store: {"NAME": "value", ...}.
+# Defaults to ~/.config/rosa/secrets.json.gpg; uncomment to override, or pass --store.
+#store = "~/.config/rosa/secrets.json.gpg"
 
 # Key used when add/rm/edit re-encrypt the store. An email works, but a
 # full fingerprint is unambiguous when several keys carry the same uid.

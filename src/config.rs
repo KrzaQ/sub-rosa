@@ -72,8 +72,15 @@ impl Config {
     pub fn store_path(&self) -> PathBuf {
         match &self.store {
             Some(s) => expand_tilde(s),
-            None => home().join(".secrets.json.gpg"),
+            None => config_dir().join("secrets.json.gpg"),
         }
+    }
+
+    /// Override the store path (from the `--store` flag), winning over both the config's
+    /// `store` key and the built-in default. Kept as the same `store` field so `store_path`
+    /// stays the one place that resolves it.
+    pub fn set_store(&mut self, path: PathBuf) {
+        self.store = Some(path.to_string_lossy().into_owned());
     }
 
     pub fn policy_for(&self, name: &str) -> Policy {
