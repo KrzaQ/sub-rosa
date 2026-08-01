@@ -48,6 +48,8 @@ enum Cmd {
     Status,
     /// Ask a running agent to re-read the store
     Reload,
+    /// Print the socket path clients and the agent resolve to
+    Sock,
     /// Add or replace a secret (value typed hidden on this tty)
     Add { name: String },
     /// Remove a secret
@@ -70,6 +72,10 @@ fn main() -> Result<()> {
         Cmd::Ls => client::ls(&cfg),
         Cmd::Status => client::status(),
         Cmd::Reload => client::reload(),
+        Cmd::Sock => {
+            println!("{}", protocol::sock_path().display());
+            Ok(())
+        }
         Cmd::Add { name } => mgmt::add(&cfg, &name),
         Cmd::Rm { name } => mgmt::rm(&cfg, &name),
         Cmd::Edit => mgmt::edit(&cfg),

@@ -77,6 +77,7 @@ FOO=$(rosa get FOO)
 rosa ls          # names + policies + active grants (never values)
 rosa status      # secret/grant counts, uptime
 rosa reload      # re-read the store without restarting
+rosa sock        # print the socket path (for scripts and tooling)
 
 rosa add NAME    # value typed hidden on your tty, then re-encrypted
 rosa rm NAME
@@ -102,7 +103,8 @@ Other ops: `{"op":"ls"}` → `{"ok":true,"secrets":[{"name":…,"policy":…,
 "grant":…}]}`, `{"op":"status"}` → counts and uptime, `{"op":"reload"}`.
 
 - The socket is `$ROSA_SOCK`, defaulting to
-  `${XDG_CONFIG_HOME:-$HOME/.config}/rosa/rosa.sock`.
+  `${XDG_CONFIG_HOME:-$HOME/.config}/rosa/rosa.sock`. `rosa sock` prints the
+  resolved path, so tooling can ask instead of re-deriving it.
 - A confirm-gated `get` blocks until the human decides — up to
   `request_timeout_secs` (+5s grace). Read without a socket timeout, or
   with a generous one.
