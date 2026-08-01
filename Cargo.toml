@@ -1,6 +1,6 @@
 [package]
 name = "sub-rosa"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "sub rosa — a secret-brokering agent with a human approval gate on its own tty"
 license = "MIT"
