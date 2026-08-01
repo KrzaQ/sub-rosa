@@ -8,7 +8,7 @@
 set -eu
 
 name=$1
-sock=${ROSA_SOCK:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rosa.sock}
+sock=${ROSA_SOCK:-${XDG_CONFIG_HOME:-$HOME/.config}/rosa/rosa.sock}
 
 reply=$(printf '{"op":"get","name":"%s"}\n' "$name" | socat -t 120 - "UNIX-CONNECT:$sock")
 

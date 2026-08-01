@@ -31,8 +31,9 @@ secret.
   by default — set `store` in the config or pass `--store` to override — a
   JSON object of `NAME: value`). They are decrypted once, into the agent's
   memory, when `rosa serve` starts.
-- Values only leave the agent over a `0600` unix socket in
-  `$XDG_RUNTIME_DIR`.
+- Values only leave the agent over a `0600` unix socket at
+  `~/.config/rosa/rosa.sock`. No systemd user session required — rosa runs
+  the same on a bare WSL or container shell with no `$XDG_RUNTIME_DIR`.
 - `confirm`-policy secrets require a decision typed into the **agent's own
   terminal** — a channel the requesting process cannot reach. An AI agent can
   *trigger* a request; it cannot *answer* it.
@@ -100,7 +101,8 @@ newline-delimited JSON, one request per connection:
 Other ops: `{"op":"ls"}` → `{"ok":true,"secrets":[{"name":…,"policy":…,
 "grant":…}]}`, `{"op":"status"}` → counts and uptime, `{"op":"reload"}`.
 
-- The socket is `$ROSA_SOCK`, defaulting to `$XDG_RUNTIME_DIR/rosa.sock`.
+- The socket is `$ROSA_SOCK`, defaulting to
+  `${XDG_CONFIG_HOME:-$HOME/.config}/rosa/rosa.sock`.
 - A confirm-gated `get` blocks until the human decides — up to
   `request_timeout_secs` (+5s grace). Read without a socket timeout, or
   with a generous one.
@@ -120,7 +122,7 @@ See [config.example.toml](config.example.toml). Policies are per secret:
 `confirm` — the default — asks every time unless a grant is active.
 
 `ROSA_SOCK` overrides the socket path (default
-`$XDG_RUNTIME_DIR/rosa.sock`).
+`${XDG_CONFIG_HOME:-$HOME/.config}/rosa/rosa.sock`).
 
 ## Threat model, honestly
 

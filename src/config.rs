@@ -108,11 +108,16 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
-pub fn runtime_dir() -> PathBuf {
-    match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => PathBuf::from(format!("/run/user/{}", unsafe { nix::libc::getuid() })),
+/// Create a directory we are about to put secrets (or the socket) in, at
+/// `0700`. Only the directories we create get the mode — an existing one is
+/// the user's business, and a permissive umask shouldn't decide this for us.
+pub fn ensure_private_dir(dir: &Path) -> Result<()> {
+    if dir.exists() {
+        return Ok(());
     }
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .with_context(|| format!("securing {}", dir.display()))
 }
 
 /// Where `rosa edit` stages the decrypted store for $EDITOR. Wants tmpfs, so

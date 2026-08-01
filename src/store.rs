@@ -39,8 +39,7 @@ pub fn save(path: &Path, map: &BTreeMap<String, String>, recipient: Option<&str>
     // The default store now lives under ~/.config/rosa, which a fresh machine may not have yet;
     // gpg's `-o` can't create it, so make the parent first.
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        crate::config::ensure_private_dir(dir)?;
     }
     let tmp = path.with_extension("tmp.gpg");
     let mut cmd = Command::new("gpg");

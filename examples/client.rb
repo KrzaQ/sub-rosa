@@ -9,7 +9,7 @@ require 'socket'
 
 def rosa_get(name)
   sock = ENV['ROSA_SOCK'] ||
-         File.join(ENV.fetch('XDG_RUNTIME_DIR', "/run/user/#{Process.uid}"), 'rosa.sock')
+         File.join(ENV['XDG_CONFIG_HOME'] || File.expand_path('~/.config'), 'rosa', 'rosa.sock')
   UNIXSocket.open(sock) do |s|
     s.puts JSON.generate(op: 'get', name: name)
     # A confirm-gated secret blocks here until the human decides.

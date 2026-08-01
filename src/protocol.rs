@@ -17,9 +17,14 @@ pub enum Request {
 /// the TUI (which auto-denies at the deadline) always answers first.
 pub const HANDLER_GRACE_SECS: u64 = 5;
 
+/// The socket lives beside the store rather than in $XDG_RUNTIME_DIR: that
+/// directory does not exist without a session manager (WSL, containers), and
+/// a socket needs no tmpfs. Keep this a pure function of the environment —
+/// probing the filesystem would let the agent and a client started later,
+/// under different conditions, pick different paths.
 pub fn sock_path() -> PathBuf {
     match std::env::var_os("ROSA_SOCK") {
         Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => crate::config::runtime_dir().join("rosa.sock"),
+        _ => crate::config::config_dir().join("rosa.sock"),
     }
 }

@@ -11,7 +11,9 @@ import sys
 
 def rosa_get(name: str) -> str:
     sock_path = os.environ.get("ROSA_SOCK") or os.path.join(
-        os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "rosa.sock"
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+        "rosa",
+        "rosa.sock",
     )
     with socket.socket(socket.AF_UNIX) as s:
         s.connect(sock_path)

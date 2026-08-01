@@ -204,6 +204,10 @@ pub enum ServerMsg {
 
 pub fn serve(cfg: Config) -> Result<()> {
     let sock = sock_path();
+    // A fresh machine may not have the config dir yet.
+    if let Some(dir) = sock.parent() {
+        crate::config::ensure_private_dir(dir)?;
+    }
     if UnixStream::connect(&sock).is_ok() {
         bail!("another agent is already listening on {}", sock.display());
     }
