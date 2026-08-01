@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 
 /// Per-secret release policy.
@@ -112,6 +112,74 @@ pub fn runtime_dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => PathBuf::from(format!("/run/user/{}", unsafe { nix::libc::getuid() })),
+    }
+}
+
+/// Where `rosa edit` stages the decrypted store for $EDITOR. Wants tmpfs, so
+/// it prefers the session runtime dir — but plenty of setups never get one
+/// (WSL, sshd without pam_systemd, containers), hence the /tmp fallback.
+///
+/// Unlike the socket path this probes the filesystem, which is fine: the
+/// directory is used once, immediately, by a single process. Nobody has to
+/// rendezvous with it.
+pub fn edit_staging_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    let uid = unsafe { nix::libc::getuid() };
+    let xdg = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty());
+    let run = PathBuf::from(format!("/run/user/{uid}"));
+
+    let dir = match xdg.map(PathBuf::from) {
+        Some(d) if d.is_dir() => d,
+        _ if run.is_dir() => run,
+        _ => {
+            let fallback = PathBuf::from(format!("/tmp/rosa-{uid}"));
+            if !fallback.exists() {
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&fallback)
+                    .with_context(|| {
+                        format!(
+                            "no runtime dir ($XDG_RUNTIME_DIR unset, {} missing) \
+                             and cannot create {}",
+                            run.display(),
+                            fallback.display()
+                        )
+                    })?;
+            }
+            fallback
+        }
+    };
+
+    // /tmp is a shared namespace, so this is load-bearing rather than
+    // belt-and-braces: refuse a directory somebody else owns or left open.
+    let md = std::fs::symlink_metadata(&dir)
+        .with_context(|| format!("stat {}", dir.display()))?;
+    ensure!(md.is_dir(), "{} is not a directory", dir.display());
+    ensure!(md.uid() == uid, "{} is not owned by us", dir.display());
+    ensure!(
+        md.mode() & 0o077 == 0,
+        "{} is accessible to other users (mode {:03o})",
+        dir.display(),
+        md.mode() & 0o777
+    );
+
+    if !is_memory_backed(&dir) {
+        eprintln!(
+            "rosa: warning: {} is not tmpfs — the decrypted store will touch disk",
+            dir.display()
+        );
+    }
+    Ok(dir)
+}
+
+fn is_memory_backed(dir: &Path) -> bool {
+    use nix::sys::statfs::{statfs, TMPFS_MAGIC};
+
+    match statfs(dir) {
+        Ok(s) => s.filesystem_type() == TMPFS_MAGIC,
+        // Can't tell; don't cry wolf.
+        Err(_) => true,
     }
 }
 

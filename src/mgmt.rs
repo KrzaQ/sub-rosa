@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::{bail, ensure, Context, Result};
 
-use crate::config::{runtime_dir, Config};
+use crate::config::{edit_staging_dir, Config};
 use crate::protocol::Request;
 use crate::store;
 
@@ -49,13 +49,13 @@ pub fn rm(cfg: &Config, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// `rosa edit` — decrypt into $XDG_RUNTIME_DIR (tmpfs), open $EDITOR,
-/// validate, re-encrypt, remove the plaintext.
+/// `rosa edit` — decrypt into a private tmpfs dir, open $EDITOR, validate,
+/// re-encrypt, remove the plaintext.
 pub fn edit(cfg: &Config) -> Result<()> {
     let path = cfg.store_path();
     let map = store::load_raw(&path)?;
 
-    let tmp = runtime_dir().join(format!("rosa-edit-{}.json", std::process::id()));
+    let tmp = edit_staging_dir()?.join(format!("rosa-edit-{}.json", std::process::id()));
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
