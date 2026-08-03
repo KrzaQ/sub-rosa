@@ -124,6 +124,18 @@ See [config.example.toml](config.example.toml). Policies are per secret:
 `auto` releases freely while the agent runs (for low-stakes tokens);
 `confirm` — the default — asks every time unless a grant is active.
 
+Policy can be set three ways: by editing `[policy]`, with `rosa add NAME
+--policy auto` at creation, or from the agent's secret menu — where
+*permanently* both applies the change live and writes it into
+`config.toml`, comments intact. The agent reads its config **once, at
+startup**, so nothing written to that file reaches a running agent: its
+own terminal is the only thing that can change a live policy. That is
+deliberate — the file is writable by anything running as your uid,
+including the processes rosa is guarding, and it also holds
+`flag_ancestors`, whose banner would be worth suppressing.
+
+`default` is the `[policy]` fallback key, so no secret may be named that.
+
 `ROSA_SOCK` overrides the socket path (default
 `${XDG_CONFIG_HOME:-$HOME/.config}/rosa/rosa.sock`).
 

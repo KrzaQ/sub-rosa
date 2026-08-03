@@ -72,6 +72,7 @@ enum MenuView {
 enum MenuItem {
     MakeAuto,
     ForceConfirm,
+    SaveConfirm,
     RevertToConfig,
     Cancel,
 }
@@ -80,6 +81,8 @@ enum MenuItem {
 enum DurationItem {
     For(Duration, String),
     Session,
+    /// Writes config.toml — the only menu choice that outlives the process.
+    Permanent,
     Back,
 }
 
@@ -389,7 +392,11 @@ fn menu_root_items(sh: &Shared, name: &str) -> Vec<MenuItem> {
     match sh.effective_policy(name) {
         (_, PolicySource::Override) => vec![MenuItem::RevertToConfig, MenuItem::Cancel],
         (Policy::Confirm, _) => vec![MenuItem::MakeAuto, MenuItem::Cancel],
-        (Policy::Auto, _) => vec![MenuItem::ForceConfirm, MenuItem::Cancel],
+        (Policy::Auto, _) => vec![
+            MenuItem::ForceConfirm,
+            MenuItem::SaveConfirm,
+            MenuItem::Cancel,
+        ],
     }
 }
 
@@ -397,6 +404,7 @@ fn menu_item_label(item: MenuItem) -> &'static str {
     match item {
         MenuItem::MakeAuto => "make auto…",
         MenuItem::ForceConfirm => "force confirm (revokes grants)",
+        MenuItem::SaveConfirm => "confirm permanently (writes config)",
         MenuItem::RevertToConfig => "revert to config",
         MenuItem::Cancel => "cancel",
     }
@@ -410,6 +418,7 @@ fn duration_items(cfg: &Config) -> Vec<DurationItem> {
         .filter_map(|d| parse_duration(d).map(|dur| DurationItem::For(dur, d.clone())))
         .collect();
     items.push(DurationItem::Session);
+    items.push(DurationItem::Permanent);
     items.push(DurationItem::Back);
     items
 }
@@ -418,6 +427,7 @@ fn duration_item_label(item: &DurationItem) -> String {
     match item {
         DurationItem::For(_, d) => format!("auto for {d}"),
         DurationItem::Session => "auto until agent exits".to_string(),
+        DurationItem::Permanent => "auto permanently (writes config)".to_string(),
         DurationItem::Back => "back".to_string(),
     }
 }
@@ -471,6 +481,7 @@ fn menu_root_key(app: &mut App, name: &str, code: KeyCode) {
                 PolicyOverride { policy: Policy::Confirm, until: GrantUntil::Session },
                 "session",
             ),
+            MenuItem::SaveConfirm => persist_policy_action(app, name, Policy::Confirm),
             MenuItem::RevertToConfig => {
                 let msg = {
                     let mut sh = app.shared.lock().unwrap();
@@ -509,10 +520,48 @@ fn menu_durations_key(app: &mut App, name: &str, code: KeyCode) {
                 PolicyOverride { policy: Policy::Auto, until: GrantUntil::Session },
                 "session",
             ),
+            DurationItem::Permanent => persist_policy_action(app, name, Policy::Auto),
             DurationItem::Back => menu_set_view(app, MenuView::Root),
         },
         _ => {}
     }
+}
+
+/// Save a policy to config.toml *and* apply it live — the tty is the only
+/// authority a running agent answers to, so a save here does both.
+///
+/// The file write happens outside the `Shared` lock: request handlers block on
+/// that mutex, and a slow disk must not stall the gate.
+fn persist_policy_action(app: &mut App, name: &str, policy: Policy) {
+    if !app.shared.lock().unwrap().store.contains_key(name) {
+        app.log(format!("{name} vanished; no change"), false);
+        close_menu(app);
+        return;
+    }
+    // `rosa edit` can put a secret named `default` in the store; writing its
+    // policy would set the fallback for every unlisted secret instead.
+    if let Err(e) = crate::config::persist_policy(name, policy) {
+        app.log(format!("saving {name} failed: {e:#}"), true);
+        close_menu(app);
+        return;
+    }
+
+    let msg = {
+        let mut sh = app.shared.lock().unwrap();
+        sh.cfg.set_policy(name, policy);
+        // A leftover override would shadow what we just saved.
+        sh.overrides.remove(name);
+        if policy == Policy::Confirm {
+            let before = sh.grants.len();
+            sh.grants.retain(|g| g.name != name);
+            let revoked = before - sh.grants.len();
+            format!("saved {name} = confirm to config — revoked {revoked} grant(s)")
+        } else {
+            format!("saved {name} = auto to config")
+        }
+    };
+    app.log(msg, false);
+    close_menu(app);
 }
 
 fn apply_override(app: &mut App, name: &str, ov: PolicyOverride, label: &str) {

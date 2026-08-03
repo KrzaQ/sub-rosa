@@ -113,6 +113,12 @@ impl Config {
     pub fn request_timeout(&self) -> Duration {
         Duration::from_secs(self.request_timeout_secs)
     }
+
+    /// The in-memory half of a persisted policy change, so a live agent matches
+    /// what `persist_policy` just wrote.
+    pub fn set_policy(&mut self, name: &str, policy: Policy) {
+        self.policy.insert(name.to_string(), policy.as_str().to_string());
+    }
 }
 
 pub fn config_dir() -> PathBuf {

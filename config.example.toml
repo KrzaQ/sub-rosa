@@ -21,7 +21,9 @@ flag_ancestors = ["claude", "opencode", "node", "codex"]
 [policy]
 # "confirm" (ask on the agent tty; the default) or "auto" (release freely
 # while the agent runs). The key "default" sets the fallback for secrets
-# not listed here.
+# not listed here — so no secret may be named "default".
+# `rosa add --policy` and the agent's "permanently" menu entry write here;
+# your comments and layout are preserved.
 default = "confirm"
 #NPM_TOKEN = "auto"
 #GH_TOKEN = "auto"
