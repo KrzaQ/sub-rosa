@@ -693,7 +693,8 @@ fn draw(f: &mut Frame, app: &mut App) {
         })
         .unwrap_or_default();
     let header = format!(
-        " sub rosa · {} secrets · {} grants · {} pending{} · {}",
+        " sub rosa {} · {} secrets · {} grants · {} pending{} · {}",
+        env!("CARGO_PKG_VERSION"),
         n_secrets,
         n_grants,
         app.pending.len(),
