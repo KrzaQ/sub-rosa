@@ -218,6 +218,13 @@ pub fn serve(cfg: Config) -> Result<()> {
     eprintln!("rosa: decrypting {} …", store_path.display());
     let secrets = store::load(&store_path)?;
     eprintln!("rosa: {} secrets loaded", secrets.len());
+    if secrets.contains_key(crate::config::RESERVED_POLICY_NAME) {
+        eprintln!(
+            "rosa: warning: the secret named `{}` collides with the [policy] fallback key; \
+             its policy cannot be set",
+            crate::config::RESERVED_POLICY_NAME
+        );
+    }
 
     let shared = Arc::new(Mutex::new(Shared {
         store: secrets,

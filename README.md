@@ -80,6 +80,7 @@ rosa reload      # re-read the store without restarting
 rosa sock        # print the socket path (for scripts and tooling)
 
 rosa add NAME    # value typed hidden on your tty, then re-encrypted
+rosa add NAME --policy auto   # …and record that policy in config.toml
 rosa rm NAME
 rosa edit        # decrypt → $EDITOR (plaintext only in tmpfs) → re-encrypt
 ```

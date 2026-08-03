@@ -4,7 +4,9 @@ use std::process::Command;
 
 use anyhow::{bail, ensure, Context, Result};
 
-use crate::config::{edit_staging_dir, Config};
+use crate::config::{
+    edit_staging_dir, persist_policy, Config, Policy, RESERVED_POLICY_NAME,
+};
 use crate::protocol::Request;
 use crate::store;
 
@@ -20,7 +22,13 @@ pub fn init(cfg: &Config) -> Result<()> {
 }
 
 /// `rosa add NAME` — value typed (hidden) on this tty, never argv or a pipe.
-pub fn add(cfg: &Config, name: &str) -> Result<()> {
+/// An explicit policy is recorded in config.toml; a running agent picks it up
+/// on its next start, since it reads the config once.
+pub fn add(cfg: &Config, name: &str, policy: Option<Policy>) -> Result<()> {
+    ensure!(
+        name != RESERVED_POLICY_NAME,
+        "`{RESERVED_POLICY_NAME}` is the [policy] fallback key, not a usable secret name"
+    );
     let value = rpassword::prompt_password(format!("value for {name}: "))?;
     let again = rpassword::prompt_password("again: ")?;
     ensure!(value == again, "values do not match");
@@ -33,8 +41,19 @@ pub fn add(cfg: &Config, name: &str) -> Result<()> {
         Default::default()
     };
     let replaced = map.insert(name.to_string(), value).is_some();
+    // Store first: a policy write that fails then leaves the secret at the
+    // `default` fallback, rather than an `auto` entry for a secret that is not
+    // in the store.
     store::save(&path, &map, cfg.gpg_recipient.as_deref())?;
     println!("{} {name}", if replaced { "replaced" } else { "added" });
+    if let Some(policy) = policy {
+        persist_policy(name, policy)?;
+        println!(
+            "policy: {name} = {} — a running agent keeps its startup policy \
+             until restart (or set it from the agent's menu)",
+            policy.as_str()
+        );
+    }
     notify_agent();
     Ok(())
 }

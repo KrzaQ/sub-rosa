@@ -8,7 +8,24 @@ mod store;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PolicyArg {
+    /// Release freely while the agent runs
+    Auto,
+    /// Ask on the agent's tty every time
+    Confirm,
+}
+
+impl From<PolicyArg> for config::Policy {
+    fn from(p: PolicyArg) -> Self {
+        match p {
+            PolicyArg::Auto => config::Policy::Auto,
+            PolicyArg::Confirm => config::Policy::Confirm,
+        }
+    }
+}
 
 /// sub rosa — a secret-brokering agent with a human approval gate on its own tty.
 ///
@@ -51,7 +68,13 @@ enum Cmd {
     /// Print the socket path clients and the agent resolve to
     Sock,
     /// Add or replace a secret (value typed hidden on this tty)
-    Add { name: String },
+    Add {
+        name: String,
+        /// Record this policy in config.toml. Omit to leave an existing
+        /// secret's policy alone; a running agent applies it after a restart.
+        #[arg(long, value_name = "POLICY")]
+        policy: Option<PolicyArg>,
+    },
     /// Remove a secret
     Rm { name: String },
     /// Edit the decrypted store in $EDITOR (plaintext only in tmpfs)
@@ -76,7 +99,7 @@ fn main() -> Result<()> {
             println!("{}", protocol::sock_path().display());
             Ok(())
         }
-        Cmd::Add { name } => mgmt::add(&cfg, &name),
+        Cmd::Add { name, policy } => mgmt::add(&cfg, &name, policy.map(Into::into)),
         Cmd::Rm { name } => mgmt::rm(&cfg, &name),
         Cmd::Edit => mgmt::edit(&cfg),
     }
