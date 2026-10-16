@@ -45,6 +45,43 @@ pub fn get(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// `rosa header NAME` — prints `{"<header>":"<scheme> <value>"}` for an
+/// MCP `headersHelper`, so the value goes over a pipe and never into an
+/// argv. `scheme` None prints the bare value. On any error stdout stays
+/// empty: Claude Code then reports a helper failure instead of sending a
+/// broken header.
+pub fn header(name: &str, header: &str, scheme: Option<&str>) -> Result<()> {
+    if !is_token(header) {
+        bail!("invalid header name {header:?}");
+    }
+    if let Some(s) = scheme {
+        if !is_token(s) {
+            bail!("invalid auth scheme {s:?}");
+        }
+    }
+    let value = fetch(name)?;
+    // HTTP forbids control characters in a field value; a CR or LF would
+    // also split the header. Never echo the value in the error.
+    if value.chars().any(|c| c != '\t' && c.is_ascii_control()) {
+        bail!("{name} contains a control character and cannot be a header value");
+    }
+    let value = match scheme {
+        Some(s) => format!("{s} {value}"),
+        None => value,
+    };
+    let mut obj = serde_json::Map::new();
+    obj.insert(header.to_string(), Value::String(value));
+    println!("{}", Value::Object(obj));
+    Ok(())
+}
+
+/// An RFC 9110 token: what a header name and an auth scheme must be.
+fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
 /// `rosa exec NAME... -- cmd args` — becomes cmd with the secrets in its
 /// environment; the values never exist in the invoking shell.
 pub fn exec(names: &[String], cmd: &[String]) -> Result<()> {

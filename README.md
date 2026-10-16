@@ -74,6 +74,10 @@ rosa exec DB_URL API_TOKEN -- ./deploy.sh
 # for cases that genuinely need capture (least private — lands in your shell)
 FOO=$(rosa get FOO)
 
+# an HTTP header as JSON, for Claude Code's MCP headersHelper (see below)
+rosa header API_TOKEN                     # {"Authorization":"Bearer …"}
+rosa header API_KEY --header X-Api-Key --raw
+
 rosa ls          # names + policies + active grants (never values)
 rosa status      # secret/grant counts, uptime
 rosa reload      # re-read the store without restarting
@@ -88,6 +92,35 @@ rosa edit        # decrypt → $EDITOR (plaintext only in tmpfs) → re-encrypt
 Agent keys: `←/→` switch column, `↑/↓` select, `Enter` apply (`y` = allow
 once, `n`/`Esc` = deny); outside a prompt: `r` reload store, `c` clear all
 grants, `q` quit.
+
+## Remote MCP servers in Claude Code
+
+A remote (`http`, `sse` or `ws`) MCP server can take its auth header from
+a `headersHelper` command. Claude Code runs the command and reads a JSON
+object of header name to value from its stdout:
+
+```sh
+claude mcp add-json -s user myserver \
+  '{"type":"http","url":"https://mcp.example.com/mcp","headersHelper":"rosa header MYSERVER_TOKEN"}'
+```
+
+The token goes from the agent to `rosa` to Claude Code over pipes. It is
+never in an argv, so `ps` and `/proc/<pid>/cmdline` do not show it. A
+stdio bridge such as `mcp-remote --header "Authorization: Bearer $TOKEN"`
+puts the token in the bridge's argv for the life of the process.
+
+- `--header NAME` sets another header name, `--scheme WORD` another auth
+  scheme, and `--raw` drops the scheme.
+- On any failure (no agent, denied, unknown secret) `rosa header` prints
+  nothing on stdout and exits non-zero. Claude Code then reports a helper
+  error and does not connect.
+- Claude Code runs the helper on every connect attempt, through a shell,
+  and kills it after 10 seconds. A `confirm` secret therefore needs an
+  answer within 10 seconds, or a grant to the `rosa` requester. An `auto`
+  policy fits best.
+- Claude Code passes `CLAUDE_CODE_MCP_SERVER_NAME` and
+  `CLAUDE_CODE_MCP_SERVER_URL` to the helper. `rosa header` does not use
+  them.
 
 ## Wire protocol
 

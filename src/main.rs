@@ -59,6 +59,20 @@ enum Cmd {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Print a secret as a JSON HTTP header object, for a Claude Code MCP `headersHelper`
+    #[command(after_help = "Example: rosa header API_TOKEN  →  {\"Authorization\":\"Bearer <value>\"}")]
+    Header {
+        name: String,
+        /// Header name
+        #[arg(long, default_value = "Authorization")]
+        header: String,
+        /// Auth scheme put before the value
+        #[arg(long, default_value = "Bearer")]
+        scheme: String,
+        /// Send the bare value, without a scheme
+        #[arg(long, conflicts_with = "scheme")]
+        raw: bool,
+    },
     /// List secret names and policies (never values)
     Ls,
     /// Show agent status
@@ -92,6 +106,9 @@ fn main() -> Result<()> {
         Cmd::Serve => server::serve(cfg),
         Cmd::Get { name } => client::get(&name),
         Cmd::Exec { names, cmd } => client::exec(&names, &cmd),
+        Cmd::Header { name, header, scheme, raw } => {
+            client::header(&name, &header, (!raw).then_some(scheme.as_str()))
+        }
         Cmd::Ls => client::ls(&cfg),
         Cmd::Status => client::status(),
         Cmd::Reload => client::reload(),
